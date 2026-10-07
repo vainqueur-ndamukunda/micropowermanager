@@ -2,14 +2,15 @@
 
 async function main() {
   let input = ""
+  let generator
 
   try {
-    const { generateToken } = require("./index.js")
+    generator = require("./index.js")
 
     for await (const chunk of process.stdin) {
       input += chunk.toString("utf8")
       if (Buffer.byteLength(input, "utf8") > 4096) {
-        throw new TypeError("Input must not exceed 4096 bytes.")
+        throw new generator.InputValidationError("Input must not exceed 4096 bytes.")
       }
     }
 
@@ -17,12 +18,15 @@ async function main() {
     try {
       request = JSON.parse(input)
     } catch {
-      throw new TypeError("Input must be valid JSON.")
+      throw new generator.InputValidationError("Input must be valid JSON.")
     }
 
-    process.stdout.write(`${JSON.stringify(generateToken(request))}\n`)
+    process.stdout.write(`${JSON.stringify(generator.generateToken(request))}\n`)
   } catch (error) {
-    const message = error instanceof TypeError ? error.message : "Token generation failed."
+    const message =
+      generator && error instanceof generator.InputValidationError
+        ? error.message
+        : "Token generation failed."
     process.stderr.write(`${JSON.stringify({ error: message })}\n`)
     process.exitCode = 1
   }

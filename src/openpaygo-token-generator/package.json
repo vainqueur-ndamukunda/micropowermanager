@@ -4,10 +4,15 @@
   "private": true,
   "description": "Server-side OpenPAYGO token generation for MPM",
   "main": "index.js",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "node --test",
-    "generate": "node cli.js"
+    "generate": "node cli.js",
+    "start": "node server.js"
   },
-  "dependencies": { "openpaygo": "0.0.6" }
+  "dependencies": {
+    "openpaygo": "0.0.6"
+  }
 }

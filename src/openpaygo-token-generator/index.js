@@ -2,6 +2,12 @@
 
 const { Encoder, TokenTypes } = require("openpaygo")
 
+/**
+ * Transport handlers may expose input errors, while internal failures can contain
+ * device keys. A distinct type keeps those internal details private.
+ */
+class InputValidationError extends TypeError {}
+
 const allowedFields = new Set([
   "secretKeyHex",
   "startingCode",
@@ -22,17 +28,17 @@ const maximumCounter = 100000
 
 function requireInteger(value, field, maximum) {
   if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
-    throw new TypeError(`${field} must be an integer between 0 and ${maximum}.`)
+    throw new InputValidationError(`${field} must be an integer between 0 and ${maximum}.`)
   }
 }
 
 function generateToken(input) {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    throw new TypeError("Input must be a JSON object.")
+    throw new InputValidationError("Input must be a JSON object.")
   }
 
   if (Object.keys(input).some((field) => !allowedFields.has(field))) {
-    throw new TypeError("Input contains an unsupported field.")
+    throw new InputValidationError("Input contains an unsupported field.")
   }
 
   const {
@@ -45,23 +51,23 @@ function generateToken(input) {
   } = input
 
   if (typeof secretKeyHex !== "string" || !/^[a-fA-F0-9]{32}$/.test(secretKeyHex)) {
-    throw new TypeError("secretKeyHex must contain exactly 32 hexadecimal characters.")
+    throw new InputValidationError("secretKeyHex must contain exactly 32 hexadecimal characters.")
   }
 
   requireInteger(startingCode, "startingCode", 999999999)
   requireInteger(counter, "counter", maximumCounter)
 
   if (!operations.has(tokenType)) {
-    throw new TypeError("tokenType must be ADD_TIME, SET_TIME, or DISABLE_PAYG.")
+    throw new InputValidationError("tokenType must be ADD_TIME, SET_TIME, or DISABLE_PAYG.")
   }
 
   if (typeof restrictedDigitSet !== "boolean") {
-    throw new TypeError("restrictedDigitSet must be a boolean.")
+    throw new InputValidationError("restrictedDigitSet must be a boolean.")
   }
 
   if (tokenType === "DISABLE_PAYG") {
     if (value !== undefined) {
-      throw new TypeError("DISABLE_PAYG must not include a value.")
+      throw new InputValidationError("DISABLE_PAYG must not include a value.")
     }
   } else {
     requireInteger(value, "value", 995)
@@ -80,4 +86,4 @@ function generateToken(input) {
   return { token: finalToken, nextCounter: newCount }
 }
 
-module.exports = { generateToken }
+module.exports = { generateToken, InputValidationError }
