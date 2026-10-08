@@ -5,14 +5,14 @@ on:
     branches:
       - main
     paths:
-      - "src/openpaygo-token-generator/**"
-      - ".github/workflows/check-openpaygo-generator.yml"
+      - src/openpaygo-token-generator/**
+      - .github/workflows/check-openpaygo-generator.yml
   pull_request:
     branches:
       - main
     paths:
-      - "src/openpaygo-token-generator/**"
-      - ".github/workflows/check-openpaygo-generator.yml"
+      - src/openpaygo-token-generator/**
+      - .github/workflows/check-openpaygo-generator.yml
 
 jobs:
   test:
