@@ -1,0 +1,271 @@
+<?php
+
+namespace App\Plugins\OpenPaygo\Services;
+
+use App\Models\Device;
+use App\Models\Token;
+use App\Models\Transaction\Transaction;
+use App\Plugins\OpenPaygo\Exceptions\OpenPaygoDeviceConfigurationException;
+use App\Plugins\OpenPaygo\Exceptions\OpenPaygoIssuanceException;
+use App\Plugins\OpenPaygo\Http\Clients\OpenPaygoGeneratorClient;
+use App\Plugins\OpenPaygo\Models\OpenPaygoDeviceConfiguration;
+use App\Plugins\OpenPaygo\Models\OpenPaygoIssuanceReservation;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
+use Throwable;
+
+class OpenPaygoIssuanceService {
+    public function __construct(private OpenPaygoGeneratorClient $generatorClient) {}
+
+    public function issue(Transaction $transaction, Device $device, string $operation): Token {
+        if (!in_array($operation, ['unlock', 'reset'], true)) {
+            throw new OpenPaygoIssuanceException('OpenPAYGO issuance operation is invalid.');
+        }
+
+        $reservation = $this->reserve($transaction, $device, $operation);
+
+        if ($reservation->state === OpenPaygoIssuanceReservation::STATE_COMPLETED) {
+            return $transaction->token()->firstOrFail();
+        }
+
+        if ($reservation->state === OpenPaygoIssuanceReservation::STATE_GENERATED) {
+            return $this->persistStoredResult($reservation->id);
+        }
+
+        if ($reservation->state !== OpenPaygoIssuanceReservation::STATE_RESERVED) {
+            throw new OpenPaygoIssuanceException('OpenPAYGO issuance is unresolved and requires recovery.');
+        }
+
+        $reservation = $this->markRequesting($reservation->id);
+        $payload = [
+            'secretKeyHex' => Crypt::decryptString($reservation->secret_key_ciphertext),
+            'startingCode' => $reservation->starting_code,
+            'counter' => $reservation->counter,
+            'tokenType' => $reservation->generator_operation,
+            'restrictedDigitSet' => false,
+        ];
+
+        if ($reservation->generator_value !== null) {
+            $payload['value'] = $reservation->generator_value;
+        }
+
+        try {
+            $generated = $this->generatorClient->generateToken($payload);
+        } catch (Throwable $exception) {
+            $this->markUncertain($reservation->id);
+
+            throw new OpenPaygoIssuanceException(
+                'OpenPAYGO generator outcome is uncertain; automatic retry is blocked.',
+                previous: $exception,
+            );
+        }
+
+        if ($generated['nextCounter'] < 0 || $generated['nextCounter'] > 100000) {
+            $this->markUncertain($reservation->id);
+
+            throw new OpenPaygoIssuanceException('OpenPAYGO generator returned an invalid next counter.');
+        }
+
+        try {
+            DB::connection('tenant')->transaction(function () use ($reservation, $generated): void {
+                $lockedReservation = OpenPaygoIssuanceReservation::query()
+                    ->whereKey($reservation->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                if ($lockedReservation->state !== OpenPaygoIssuanceReservation::STATE_REQUESTING) {
+                    throw new OpenPaygoIssuanceException('OpenPAYGO reservation state changed during generation.');
+                }
+
+                $lockedReservation->token = $generated['token'];
+                $lockedReservation->next_counter = $generated['nextCounter'];
+                $lockedReservation->state = OpenPaygoIssuanceReservation::STATE_GENERATED;
+                $lockedReservation->save();
+            });
+        } catch (Throwable $exception) {
+            try {
+                $this->markUncertain($reservation->id);
+            } catch (Throwable) {
+            }
+
+            throw new OpenPaygoIssuanceException(
+                'Generator response could not be stored; issuance is uncertain and automatic retry is blocked.',
+                previous: $exception,
+            );
+        }
+
+        return $this->persistStoredResult($reservation->id);
+    }
+
+    public function recoverStaleReservations(int $staleAfterMinutes = 10): int {
+        $staleBefore = now()->subMinutes($staleAfterMinutes);
+
+        $uncertainCount = DB::connection('tenant')->transaction(function () use ($staleBefore): int {
+            return OpenPaygoIssuanceReservation::query()
+                ->where('state', OpenPaygoIssuanceReservation::STATE_REQUESTING)
+                ->where('updated_at', '<', $staleBefore)
+                ->update([
+                    'state' => OpenPaygoIssuanceReservation::STATE_UNCERTAIN,
+                    'updated_at' => now(),
+                ]);
+        });
+
+        $generatedIds = OpenPaygoIssuanceReservation::query()
+            ->where('state', OpenPaygoIssuanceReservation::STATE_GENERATED)
+            ->orderBy('id')
+            ->pluck('id');
+
+        foreach ($generatedIds as $reservationId) {
+            $this->persistGeneratedToken((int) $reservationId);
+        }
+
+        $reserved = OpenPaygoIssuanceReservation::query()
+            ->with(['transaction', 'device'])
+            ->where('state', OpenPaygoIssuanceReservation::STATE_RESERVED)
+            ->where('updated_at', '<', $staleBefore)
+            ->orderBy('id')
+            ->get();
+
+        foreach ($reserved as $reservation) {
+            $this->issue($reservation->transaction, $reservation->device, $reservation->operation);
+        }
+
+        return $uncertainCount + $generatedIds->count() + $reserved->count();
+    }
+
+    private function reserve(Transaction $transaction, Device $device, string $operation): OpenPaygoIssuanceReservation {
+        return DB::connection('tenant')->transaction(function () use ($transaction, $device, $operation): OpenPaygoIssuanceReservation {
+            $existing = OpenPaygoIssuanceReservation::query()
+                ->where('transaction_id', $transaction->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            if ($existing !== null) {
+                if ((int) $existing->device_id !== (int) $device->getKey() || $existing->operation !== $operation) {
+                    throw new OpenPaygoIssuanceException('Transaction already has a different OpenPAYGO issuance reservation.');
+                }
+
+                return $existing;
+            }
+
+            $configuration = OpenPaygoDeviceConfiguration::query()
+                ->where('device_id', $device->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            if ($configuration === null) {
+                throw new OpenPaygoDeviceConfigurationException('OpenPAYGO configuration is missing for this device.');
+            }
+
+            $active = OpenPaygoIssuanceReservation::query()
+                ->where('active_device_id', $device->getKey())
+                ->lockForUpdate()
+                ->exists();
+
+            if ($active) {
+                throw new OpenPaygoIssuanceException('Another OpenPAYGO issuance for this device is unresolved.');
+            }
+
+            return OpenPaygoIssuanceReservation::query()->create([
+                'transaction_id' => $transaction->getKey(),
+                'device_id' => $device->getKey(),
+                'active_device_id' => $device->getKey(),
+                'operation' => $operation,
+                'generator_operation' => $operation === 'unlock' ? 'DISABLE_PAYG' : 'SET_TIME',
+                'generator_value' => $operation === 'reset' ? 0 : null,
+                'counter' => (int) $configuration->next_counter,
+                'starting_code' => (int) $configuration->starting_code,
+                'secret_key_ciphertext' => $configuration->getRawOriginal('secret_key_hex'),
+                'state' => OpenPaygoIssuanceReservation::STATE_RESERVED,
+            ]);
+        });
+    }
+
+    private function markRequesting(int $reservationId): OpenPaygoIssuanceReservation {
+        return DB::connection('tenant')->transaction(function () use ($reservationId): OpenPaygoIssuanceReservation {
+            $reservation = OpenPaygoIssuanceReservation::query()->whereKey($reservationId)->lockForUpdate()->firstOrFail();
+
+            if ($reservation->state !== OpenPaygoIssuanceReservation::STATE_RESERVED) {
+                throw new OpenPaygoIssuanceException('OpenPAYGO issuance is unresolved and requires recovery.');
+            }
+
+            $reservation->state = OpenPaygoIssuanceReservation::STATE_REQUESTING;
+            $reservation->save();
+
+            return $reservation;
+        });
+    }
+
+    private function markUncertain(int $reservationId): void {
+        DB::connection('tenant')->transaction(function () use ($reservationId): void {
+            $reservation = OpenPaygoIssuanceReservation::query()->whereKey($reservationId)->lockForUpdate()->first();
+
+            if ($reservation?->state === OpenPaygoIssuanceReservation::STATE_REQUESTING) {
+                $reservation->state = OpenPaygoIssuanceReservation::STATE_UNCERTAIN;
+                $reservation->save();
+            }
+        });
+    }
+
+    private function persistGeneratedToken(int $reservationId): Token {
+        return DB::connection('tenant')->transaction(function () use ($reservationId): Token {
+            $reservation = OpenPaygoIssuanceReservation::query()->whereKey($reservationId)->lockForUpdate()->firstOrFail();
+
+            if ($reservation->state === OpenPaygoIssuanceReservation::STATE_COMPLETED) {
+                return $reservation->transaction()->firstOrFail()->token()->firstOrFail();
+            }
+
+            if ($reservation->state !== OpenPaygoIssuanceReservation::STATE_GENERATED
+                || $reservation->token === null
+                || $reservation->next_counter === null) {
+                throw new OpenPaygoIssuanceException('OpenPAYGO generator result is not available for recovery.');
+            }
+
+            $configuration = OpenPaygoDeviceConfiguration::query()
+                ->where('device_id', $reservation->device_id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $transaction = $reservation->transaction()->lockForUpdate()->firstOrFail();
+            $token = $transaction->token()->first();
+            $tokenType = $reservation->operation === 'unlock' ? Token::TYPE_UNLOCK : Token::TYPE_RESET;
+
+            if ($token === null) {
+                $token = Token::query()->create([
+                    'device_id' => $reservation->device_id,
+                    'transaction_id' => $reservation->transaction_id,
+                    'token' => $reservation->token,
+                    'token_type' => $tokenType,
+                    'token_unit' => null,
+                    'token_amount' => null,
+                ]);
+            } elseif ($token->token !== $reservation->token
+                || (int) $token->device_id !== (int) $reservation->device_id
+                || $token->token_type !== $tokenType) {
+                throw new OpenPaygoIssuanceException('Stored OpenPAYGO token does not match its generator result.');
+            }
+
+            $configuration->next_counter = $reservation->next_counter;
+            $configuration->save();
+
+            $reservation->state = OpenPaygoIssuanceReservation::STATE_COMPLETED;
+            $reservation->active_device_id = null;
+            $reservation->save();
+
+            return $token;
+        });
+    }
+
+    private function persistStoredResult(int $reservationId): Token {
+        try {
+            return $this->persistGeneratedToken($reservationId);
+        } catch (OpenPaygoIssuanceException $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            throw new OpenPaygoIssuanceException(
+                'Stored OpenPAYGO generator result requires recovery; payment rollback is blocked.',
+                previous: $exception,
+            );
+        }
+    }
+}
