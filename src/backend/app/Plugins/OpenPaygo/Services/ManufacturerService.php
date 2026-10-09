@@ -3,19 +3,32 @@
 namespace App\Plugins\OpenPaygo\Services;
 
 use App\Models\Manufacturer;
+use InvalidArgumentException;
 
 class ManufacturerService {
     public function __construct(private Manufacturer $manufacturer) {}
 
-    public function register(): void {
-        $api = $this->manufacturer->newQuery()->where('api_name', 'OpenPaygoApi')->first();
-        if ($api === null) {
+    public function register(string $name, string $type): void {
+        if (trim($name) === '' || !in_array($type, ['meter', 'shs', 'e-bike'], true)) {
+            throw new InvalidArgumentException('A manufacturer name and supported device type are required.');
+        }
+
+        $manufacturer = $this->manufacturer->newQuery()
+            ->where('name', $name)
+            ->where('type', $type)
+            ->first();
+
+        if ($manufacturer === null) {
             $this->manufacturer->newQuery()->create([
-                'name' => 'OpenPAYGO',
-                'type' => 'shs',
-                'website' => 'https://enaccess.github.io/OpenPAYGO-docs/',
+                'name' => $name,
+                'type' => $type,
                 'api_name' => 'OpenPaygoApi',
             ]);
+        } elseif ($manufacturer->api_name !== null && $manufacturer->api_name !== 'OpenPaygoApi') {
+            throw new InvalidArgumentException('This manufacturer already uses a different API integration.');
+        } elseif ($manufacturer->api_name === null) {
+            $manufacturer->api_name = 'OpenPaygoApi';
+            $manufacturer->save();
         }
     }
 }

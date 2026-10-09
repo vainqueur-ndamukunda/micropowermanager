@@ -175,7 +175,10 @@ class OpenPaygoApiTest extends TestCase {
     public function testProviderAliasResolvesAndManufacturerRegistrationUsesTheSameApiName(): void {
         $this->assertInstanceOf(OpenPaygoApi::class, resolve('OpenPaygoApi'));
 
-        $this->assertSame(0, Artisan::call('openpaygo:install'));
+        $this->assertSame(0, Artisan::call('openpaygo:install', [
+            'manufacturer-name' => 'Test OpenPAYGO Device',
+            'type' => 'shs',
+        ]));
 
         $manufacturer = Manufacturer::query()->where('api_name', 'OpenPaygoApi')->firstOrFail();
         $this->assertSame('OpenPaygoApi', $manufacturer->api_name);
