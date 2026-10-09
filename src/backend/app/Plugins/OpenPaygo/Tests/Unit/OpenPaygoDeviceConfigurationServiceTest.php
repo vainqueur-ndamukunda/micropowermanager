@@ -98,17 +98,6 @@ class OpenPaygoDeviceConfigurationServiceTest extends TestCase {
         }
     }
 
-    public function testCounterPersistsExactGeneratorReturnedValue(): void {
-        $device = $this->createDevice();
-        $service = new OpenPaygoDeviceConfigurationService();
-        $service->saveForDevice($device, '0123456789abcdef0123456789abcdef', 1, 0);
-
-        $configuration = $service->updateNextCounter($device, 2);
-
-        $this->assertSame(2, $configuration->next_counter);
-        $this->assertSame(2, $service->getForDevice($device)['nextCounter']);
-    }
-
     public function testOrdinaryConfigurationUpdatePreservesCounterWhenOmitted(): void {
         $device = $this->createDevice();
         $service = new OpenPaygoDeviceConfigurationService();

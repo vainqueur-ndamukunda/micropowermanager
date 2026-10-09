@@ -7,7 +7,6 @@ use App\Plugins\OpenPaygo\Exceptions\OpenPaygoDeviceConfigurationException;
 use App\Plugins\OpenPaygo\Exceptions\OpenPaygoSecretStorageException;
 use App\Plugins\OpenPaygo\Models\OpenPaygoDeviceConfiguration;
 use Illuminate\Support\Facades\Crypt;
-use Illuminate\Support\Facades\DB;
 use Throwable;
 
 class OpenPaygoDeviceConfigurationService {
@@ -56,26 +55,6 @@ class OpenPaygoDeviceConfigurationService {
         $configuration->save();
 
         return $configuration;
-    }
-
-    public function updateNextCounter(Device $device, mixed $returnedCounter): OpenPaygoDeviceConfiguration {
-        $this->validateCounter($returnedCounter);
-
-        return DB::connection('tenant')->transaction(function () use ($device, $returnedCounter): OpenPaygoDeviceConfiguration {
-            $configuration = OpenPaygoDeviceConfiguration::query()
-                ->where('device_id', $device->getKey())
-                ->lockForUpdate()
-                ->first();
-
-            if ($configuration === null) {
-                throw new OpenPaygoDeviceConfigurationException('OpenPAYGO configuration is missing for this device.');
-            }
-
-            $configuration->next_counter = $returnedCounter;
-            $configuration->save();
-
-            return $configuration;
-        });
     }
 
     private function findForDevice(Device $device): OpenPaygoDeviceConfiguration {

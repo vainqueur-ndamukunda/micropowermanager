@@ -9,16 +9,11 @@ use App\Exceptions\Manufacturer\ApiCallDoesNotSupportedException;
 use App\Lib\IManufacturerAPI;
 use App\Models\Device;
 use App\Models\Token;
-use App\Plugins\OpenPaygo\Exceptions\OpenPaygoCounterPersistenceException;
-use App\Plugins\OpenPaygo\Http\Clients\OpenPaygoGeneratorClient;
-use App\Plugins\OpenPaygo\Services\OpenPaygoDeviceConfigurationService;
-use Throwable;
+use App\Models\Transaction\Transaction;
+use App\Plugins\OpenPaygo\Services\OpenPaygoIssuanceService;
 
 class OpenPaygoApi implements IManufacturerAPI {
-    public function __construct(
-        private OpenPaygoGeneratorClient $generatorClient,
-        private OpenPaygoDeviceConfigurationService $configurationService,
-    ) {}
+    public function __construct(private OpenPaygoIssuanceService $issuanceService) {}
 
     /**
      * @return list<ManufacturerCapability>
@@ -42,57 +37,36 @@ class OpenPaygoApi implements IManufacturerAPI {
             throw new ApiCallDoesNotSupportedException('OpenPAYGO unlock requires a device.');
         }
 
-        $token = $this->generateAndPersistCounter($device, 'DISABLE_PAYG');
-
-        return [
-            'token' => $token,
-            'token_type' => Token::TYPE_UNLOCK,
-            'token_unit' => null,
-            'token_amount' => null,
-        ];
+        return $this->tokenData($this->issueForTransaction($transactionContainer->transaction, $device, 'unlock'));
     }
 
     public function clearDevice(Device $device): ?array {
-        $token = $this->generateAndPersistCounter($device, 'SET_TIME', 0);
-
-        return [
-            'token' => $token,
-            'token_type' => Token::TYPE_RESET,
-            'token_unit' => null,
-            'token_amount' => null,
-        ];
+        throw new ApiCallDoesNotSupportedException('OpenPAYGO reset requires a transaction context.');
     }
 
-    private function generateAndPersistCounter(Device $device, string $tokenType, ?int $value = null): string {
+    public function issueForTransaction(Transaction $transaction, ?Device $device, string $operation): Token {
+        if ($device === null) {
+            throw new ApiCallDoesNotSupportedException('OpenPAYGO issuance requires a device.');
+        }
+
         if (!in_array($device->device_type, [DeviceType::SolarHomeSystem->value, DeviceType::EBike->value], true)) {
             throw new ApiCallDoesNotSupportedException(
                 'OpenPAYGO time tokens are not supported for this device type.'
             );
         }
 
-        $configuration = $this->configurationService->getForDevice($device);
-        $payload = [
-            'secretKeyHex' => $configuration['secretKeyHex'],
-            'startingCode' => $configuration['startingCode'],
-            'counter' => $configuration['nextCounter'],
-            'tokenType' => $tokenType,
-            'restrictedDigitSet' => false,
+        return $this->issuanceService->issue($transaction, $device, $operation);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function tokenData(Token $token): array {
+        return [
+            'token' => $token->token,
+            'token_type' => $token->token_type,
+            'token_unit' => $token->token_unit,
+            'token_amount' => $token->token_amount,
         ];
-
-        if ($value !== null) {
-            $payload['value'] = $value;
-        }
-
-        $generated = $this->generatorClient->generateToken($payload);
-
-        try {
-            $this->configurationService->updateNextCounter($device, $generated['nextCounter']);
-        } catch (Throwable) {
-            throw new OpenPaygoCounterPersistenceException(
-                'OpenPAYGO generated a token but could not persist its counter; the token was not returned.'
-            );
-        }
-
-        return $generated['token'];
     }
 }
