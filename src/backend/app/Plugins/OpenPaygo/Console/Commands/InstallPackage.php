@@ -7,7 +7,7 @@ use Illuminate\Console\Command;
 use InvalidArgumentException;
 
 class InstallPackage extends Command {
-    protected $signature = 'openpaygo:install {manufacturer-name} {type : meter, shs, or e-bike}';
+    protected $signature = 'openpaygo:install {manufacturer-name} {type : shs or e-bike}';
     protected $description = 'Register a manufacturer that uses the OpenPAYGO token protocol';
 
     public function __construct(private ManufacturerService $manufacturerService) {

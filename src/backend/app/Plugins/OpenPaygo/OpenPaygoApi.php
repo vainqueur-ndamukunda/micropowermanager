@@ -3,6 +3,7 @@
 namespace App\Plugins\OpenPaygo;
 
 use App\DTO\TransactionDataContainer;
+use App\Enums\DeviceType;
 use App\Enums\ManufacturerCapability;
 use App\Exceptions\Manufacturer\ApiCallDoesNotSupportedException;
 use App\Lib\IManufacturerAPI;
@@ -63,6 +64,12 @@ class OpenPaygoApi implements IManufacturerAPI {
     }
 
     private function generateAndPersistCounter(Device $device, string $tokenType, ?int $value = null): string {
+        if (!in_array($device->device_type, [DeviceType::SolarHomeSystem->value, DeviceType::EBike->value], true)) {
+            throw new ApiCallDoesNotSupportedException(
+                'OpenPAYGO time tokens are not supported for this device type.'
+            );
+        }
+
         $configuration = $this->configurationService->getForDevice($device);
         $payload = [
             'secretKeyHex' => $configuration['secretKeyHex'],

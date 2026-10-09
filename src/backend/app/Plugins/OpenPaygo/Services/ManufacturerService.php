@@ -9,8 +9,8 @@ class ManufacturerService {
     public function __construct(private Manufacturer $manufacturer) {}
 
     public function register(string $name, string $type): void {
-        if (trim($name) === '' || !in_array($type, ['meter', 'shs', 'e-bike'], true)) {
-            throw new InvalidArgumentException('A manufacturer name and supported device type are required.');
+        if (trim($name) === '' || !in_array($type, ['shs', 'e-bike'], true)) {
+            throw new InvalidArgumentException('A manufacturer name and time-based device type (shs or e-bike) are required.');
         }
 
         $manufacturer = $this->manufacturer->newQuery()

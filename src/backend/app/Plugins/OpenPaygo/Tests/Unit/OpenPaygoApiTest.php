@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Plugins\OpenPaygo\Tests\Unit;
 
 use App\DTO\TransactionDataContainer;
+use App\Enums\DeviceType;
 use App\Enums\ManufacturerCapability;
 use App\Exceptions\Manufacturer\ApiCallDoesNotSupportedException;
 use App\Lib\IManufacturerAPI;
@@ -50,7 +51,7 @@ class OpenPaygoApiTest extends TestCase {
     }
 
     public function testUnlockUsesDisablePaygAndPersistsExactCounter(): void {
-        $device = new Device();
+        $device = $this->timeBasedDevice();
         $configuration = [
             'secretKeyHex' => str_repeat('a', 32),
             'startingCode' => 321,
@@ -78,7 +79,7 @@ class OpenPaygoApiTest extends TestCase {
     }
 
     public function testClearUsesSetTimeZeroAndPersistsExactCounter(): void {
-        $device = new Device();
+        $device = $this->timeBasedDevice();
         $this->configurationService->shouldReceive('getForDevice')->once()->with($device)->andReturn([
             'secretKeyHex' => str_repeat('b', 32),
             'startingCode' => 654,
@@ -104,7 +105,7 @@ class OpenPaygoApiTest extends TestCase {
     }
 
     public function testMissingConfigurationFailsBeforeGeneratorInvocation(): void {
-        $device = new Device();
+        $device = $this->timeBasedDevice();
         $this->configurationService->shouldReceive('getForDevice')
             ->once()->with($device)->andThrow(new OpenPaygoDeviceConfigurationException('configuration missing'));
         $this->generatorClient->shouldNotReceive('generateToken');
@@ -117,7 +118,7 @@ class OpenPaygoApiTest extends TestCase {
     }
 
     public function testGeneratorFailureDoesNotPersistCounter(): void {
-        $device = new Device();
+        $device = $this->timeBasedDevice();
         $this->configurationService->shouldReceive('getForDevice')->once()->with($device)->andReturn([
             'secretKeyHex' => str_repeat('c', 32),
             'startingCode' => 789,
@@ -134,7 +135,7 @@ class OpenPaygoApiTest extends TestCase {
     }
 
     public function testTokenIsNotReturnedWhenCounterPersistenceFails(): void {
-        $device = new Device();
+        $device = $this->timeBasedDevice();
         $this->configurationService->shouldReceive('getForDevice')->once()->with($device)->andReturn([
             'secretKeyHex' => str_repeat('d', 32),
             'startingCode' => 987,
@@ -172,6 +173,18 @@ class OpenPaygoApiTest extends TestCase {
         $this->api->chargeDevice(new TransactionDataContainer());
     }
 
+    public function testMeterResetIsUnsupportedBecauseMpmMetersUseEnergyUnits(): void {
+        $device = new Device();
+        $device->device_type = DeviceType::Meter->value;
+        $this->configurationService->shouldNotReceive('getForDevice');
+        $this->generatorClient->shouldNotReceive('generateToken');
+
+        $this->expectException(ApiCallDoesNotSupportedException::class);
+        $this->expectExceptionMessage('not supported for this device type');
+
+        $this->api->clearDevice($device);
+    }
+
     public function testProviderAliasResolvesAndManufacturerRegistrationUsesTheSameApiName(): void {
         $this->assertInstanceOf(OpenPaygoApi::class, resolve('OpenPaygoApi'));
 
@@ -182,5 +195,12 @@ class OpenPaygoApiTest extends TestCase {
 
         $manufacturer = Manufacturer::query()->where('api_name', 'OpenPaygoApi')->firstOrFail();
         $this->assertSame('OpenPaygoApi', $manufacturer->api_name);
+    }
+
+    private function timeBasedDevice(): Device {
+        $device = new Device();
+        $device->device_type = DeviceType::SolarHomeSystem->value;
+
+        return $device;
     }
 }
