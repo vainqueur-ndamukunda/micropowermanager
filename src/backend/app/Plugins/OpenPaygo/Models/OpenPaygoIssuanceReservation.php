@@ -16,6 +16,7 @@ use Illuminate\Support\Carbon;
  * @property string      $operation
  * @property string      $generator_operation
  * @property int|null    $generator_value
+ * @property int|null    $credit_days
  * @property int         $counter
  * @property int         $starting_code
  * @property string      $secret_key_ciphertext
@@ -38,6 +39,7 @@ class OpenPaygoIssuanceReservation extends BaseModel {
 
     protected $casts = [
         'generator_value' => 'integer',
+        'credit_days' => 'integer',
         'counter' => 'integer',
         'starting_code' => 'integer',
         'next_counter' => 'integer',

@@ -12,6 +12,7 @@ use Illuminate\Support\Carbon;
  * @property int         $device_id
  * @property string      $secret_key_hex
  * @property int         $starting_code
+ * @property int|null    $time_divider
  * @property int         $next_counter
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
@@ -23,6 +24,7 @@ class OpenPaygoDeviceConfiguration extends BaseModel {
 
     protected $casts = [
         'starting_code' => 'integer',
+        'time_divider' => 'integer',
         'next_counter' => 'integer',
     ];
 

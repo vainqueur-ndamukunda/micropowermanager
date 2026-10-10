@@ -7,6 +7,7 @@ use App\Enums\DeviceType;
 use App\Enums\ManufacturerCapability;
 use App\Exceptions\Manufacturer\ApiCallDoesNotSupportedException;
 use App\Lib\IManufacturerAPI;
+use App\Models\AppliancePerson;
 use App\Models\Device;
 use App\Models\Token;
 use App\Models\Transaction\Transaction;
@@ -26,8 +27,47 @@ class OpenPaygoApi implements IManufacturerAPI {
     }
 
     public function chargeDevice(TransactionDataContainer $transactionContainer): array {
-        throw new ApiCallDoesNotSupportedException(
-            'OpenPAYGO credit tokens require a verified mapping from MPM credit units and the device time divider.'
+        return $this->tokenData($this->issuePayment($transactionContainer));
+    }
+
+    public function issuePayment(TransactionDataContainer $transactionContainer): Token {
+        $device = $transactionContainer->device;
+        if ($device === null) {
+            throw new ApiCallDoesNotSupportedException('OpenPAYGO credit issuance requires a device.');
+        }
+
+        if (!in_array($device->device_type, [DeviceType::SolarHomeSystem->value, DeviceType::EBike->value], true)) {
+            throw new ApiCallDoesNotSupportedException(
+                'OpenPAYGO time tokens are not supported for this device type.'
+            );
+        }
+
+        $isEnergyService = $transactionContainer->appliancePerson instanceof AppliancePerson
+            && $transactionContainer->appliancePerson->isEnergyService();
+        if (!$isEnergyService && $transactionContainer->applianceInstallmentsFullFilled) {
+            return $this->issueForTransaction($transactionContainer->transaction, $device, 'unlock');
+        }
+
+        if (!isset(
+            $transactionContainer->amount,
+            $transactionContainer->installmentCost,
+            $transactionContainer->dayDifferenceBetweenTwoInstallments,
+        ) || !is_finite($transactionContainer->amount)
+            || !is_finite($transactionContainer->installmentCost)
+            || !is_finite($transactionContainer->dayDifferenceBetweenTwoInstallments)
+            || $transactionContainer->amount <= 0
+            || $transactionContainer->installmentCost <= 0
+            || $transactionContainer->dayDifferenceBetweenTwoInstallments <= 0) {
+            throw new ApiCallDoesNotSupportedException(
+                'OpenPAYGO credit issuance requires a valid payment with MPM-calculated credit days.'
+            );
+        }
+
+        return $this->issueForTransaction(
+            $transactionContainer->transaction,
+            $device,
+            'credit',
+            $transactionContainer->creditDays(),
         );
     }
 
@@ -44,7 +84,12 @@ class OpenPaygoApi implements IManufacturerAPI {
         throw new ApiCallDoesNotSupportedException('OpenPAYGO reset requires a transaction context.');
     }
 
-    public function issueForTransaction(Transaction $transaction, ?Device $device, string $operation): Token {
+    public function issueForTransaction(
+        Transaction $transaction,
+        ?Device $device,
+        string $operation,
+        ?float $creditDays = null,
+    ): Token {
         if ($device === null) {
             throw new ApiCallDoesNotSupportedException('OpenPAYGO issuance requires a device.');
         }
@@ -55,7 +100,7 @@ class OpenPaygoApi implements IManufacturerAPI {
             );
         }
 
-        return $this->issuanceService->issue($transaction, $device, $operation);
+        return $this->issuanceService->issue($transaction, $device, $operation, $creditDays);
     }
 
     /**

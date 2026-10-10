@@ -79,6 +79,10 @@ class OpenPaygoDeviceControlTest extends TestCase {
         $this->assertSame(Token::TYPE_RESET, $token->token_type);
         $this->assertSame($transaction->id, $token->transaction_id);
         $this->assertSame(9, $configuration->fresh()->next_counter);
+        Event::assertDispatched(
+            NewLogEvent::class,
+            fn (NewLogEvent $event): bool => !str_contains($event->logData['action'], $token->token),
+        );
         Http::assertSentCount(1);
     }
 }

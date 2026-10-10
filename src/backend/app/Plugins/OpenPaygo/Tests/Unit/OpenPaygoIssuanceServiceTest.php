@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace App\Plugins\OpenPaygo\Tests\Unit;
 
 use App\Enums\DeviceType;
+use App\Exceptions\Manufacturer\ApiCallDoesNotSupportedException;
 use App\Models\Device;
 use App\Models\Token;
 use App\Models\Transaction\Transaction;
+use App\Plugins\OpenPaygo\Exceptions\OpenPaygoDeviceConfigurationException;
 use App\Plugins\OpenPaygo\Exceptions\OpenPaygoIssuanceException;
 use App\Plugins\OpenPaygo\Http\Clients\OpenPaygoGeneratorClient;
 use App\Plugins\OpenPaygo\Models\OpenPaygoDeviceConfiguration;
@@ -75,6 +77,126 @@ class OpenPaygoIssuanceServiceTest extends TestCase {
             OpenPaygoIssuanceReservation::STATE_COMPLETED,
             OpenPaygoIssuanceReservation::query()->where('transaction_id', $transaction->id)->value('state'),
         );
+    }
+
+    public function testCreditUsesVerifiedDividerAndPersistsMpmCreditDays(): void {
+        $device = $this->createDevice();
+        $this->saveConfiguration($device, 6, 4);
+        $transaction = $this->createTransaction($device);
+        $generator = Mockery::mock(OpenPaygoGeneratorClient::class);
+        $generator->shouldReceive('generateToken')->once()->with([
+            'secretKeyHex' => '0123456789abcdef0123456789abcdef',
+            'startingCode' => 123,
+            'counter' => 6,
+            'tokenType' => 'ADD_TIME',
+            'restrictedDigitSet' => false,
+            'value' => 60,
+        ])->andReturn([
+            'token' => 'credit-token',
+            'nextCounter' => 7,
+        ]);
+
+        $token = (new OpenPaygoIssuanceService($generator))->issue($transaction, $device, 'credit', 15);
+
+        $this->assertSame(Token::TYPE_TIME, $token->token_type);
+        $this->assertSame(Token::UNIT_DAYS, $token->token_unit);
+        $this->assertSame(15, (int) $token->token_amount);
+        $this->assertSame(
+            60,
+            OpenPaygoIssuanceReservation::query()->where('transaction_id', $transaction->id)->value('generator_value'),
+        );
+        $this->assertSame(
+            15,
+            OpenPaygoIssuanceReservation::query()->where('transaction_id', $transaction->id)->value('credit_days'),
+        );
+    }
+
+    public function testCreditConversionAcceptsMinimumAndMaximumGeneratorValues(): void {
+        foreach ([[1, 1], [995, 995]] as [$days, $expectedValue]) {
+            $device = $this->createDevice();
+            $this->saveConfiguration($device, 6, 1);
+            $transaction = $this->createTransaction($device);
+            $generator = Mockery::mock(OpenPaygoGeneratorClient::class);
+            $generator->shouldReceive('generateToken')->once()->withArgs(
+                fn (array $payload): bool => $payload['tokenType'] === 'ADD_TIME'
+                    && $payload['value'] === $expectedValue
+            )->andReturn([
+                'token' => 'boundary-token-'.$days,
+                'nextCounter' => 7,
+            ]);
+
+            (new OpenPaygoIssuanceService($generator))->issue($transaction, $device, 'credit', (float) $days);
+        }
+    }
+
+    public function testSeparatePaymentsAdvanceTheDeviceCounterAndKeepTheirCreditAmounts(): void {
+        $device = $this->createDevice();
+        $this->saveConfiguration($device, 6, 4);
+        $firstTransaction = $this->createTransaction($device);
+        $secondTransaction = $this->createTransaction($device);
+        $generator = Mockery::mock(OpenPaygoGeneratorClient::class);
+        $generator->shouldReceive('generateToken')->once()->withArgs(
+            fn (array $payload): bool => $payload['counter'] === 6
+                && $payload['tokenType'] === 'ADD_TIME'
+                && $payload['value'] === 60
+        )->andReturn(['token' => 'first-credit', 'nextCounter' => 7]);
+        $generator->shouldReceive('generateToken')->once()->withArgs(
+            fn (array $payload): bool => $payload['counter'] === 7
+                && $payload['tokenType'] === 'ADD_TIME'
+                && $payload['value'] === 120
+        )->andReturn(['token' => 'second-credit', 'nextCounter' => 8]);
+        $service = new OpenPaygoIssuanceService($generator);
+
+        $firstToken = $service->issue($firstTransaction, $device, 'credit', 15);
+        $secondToken = $service->issue($secondTransaction, $device, 'credit', 30);
+
+        $this->assertSame('first-credit', $firstToken->token);
+        $this->assertSame('second-credit', $secondToken->token);
+        $this->assertSame(8, (new OpenPaygoDeviceConfigurationService())->getForDevice($device)['nextCounter']);
+        $this->assertSame(15, (int) $firstToken->token_amount);
+        $this->assertSame(30, (int) $secondToken->token_amount);
+    }
+
+    public function testMissingLegacyDividerBlocksCreditBeforeGeneratorCall(): void {
+        $device = $this->createDevice();
+        $this->saveConfiguration($device);
+        $transaction = $this->createTransaction($device);
+        $generator = Mockery::mock(OpenPaygoGeneratorClient::class);
+        $generator->shouldNotReceive('generateToken');
+
+        $this->expectExceptionMessage('time divider is missing or invalid');
+        (new OpenPaygoIssuanceService($generator))->issue($transaction, $device, 'credit', 1);
+    }
+
+    public function testMissingDeviceConfigurationBlocksCredit(): void {
+        $device = $this->createDevice();
+        $transaction = $this->createTransaction($device);
+        $generator = Mockery::mock(OpenPaygoGeneratorClient::class);
+        $generator->shouldNotReceive('generateToken');
+
+        $this->expectException(OpenPaygoDeviceConfigurationException::class);
+        $this->expectExceptionMessage('configuration is missing');
+        (new OpenPaygoIssuanceService($generator))->issue($transaction, $device, 'credit', 1);
+    }
+
+    public function testInvalidAndOutOfRangeCreditIsBlockedBeforeGeneratorCall(): void {
+        foreach ([[0.0, 1], [-1.0, 1], [1.5, 1], [996.0, 1], [249.0, 4]] as [$creditDays, $timeDivider]) {
+            $device = $this->createDevice();
+            $this->saveConfiguration($device, 6, $timeDivider);
+            $transaction = $this->createTransaction($device);
+            $generator = Mockery::mock(OpenPaygoGeneratorClient::class);
+            $generator->shouldNotReceive('generateToken');
+
+            try {
+                (new OpenPaygoIssuanceService($generator))->issue($transaction, $device, 'credit', $creditDays);
+                $this->fail('Expected invalid credit conversion to fail.');
+            } catch (ApiCallDoesNotSupportedException) {
+                $this->assertSame(
+                    0,
+                    OpenPaygoIssuanceReservation::query()->where('transaction_id', $transaction->id)->count(),
+                );
+            }
+        }
     }
 
     public function testGeneratorReturnedCounterMayReachDocumentedBoundary(): void {
@@ -241,12 +363,13 @@ class OpenPaygoIssuanceServiceTest extends TestCase {
         ]);
     }
 
-    private function saveConfiguration(Device $device, int $counter = 6): OpenPaygoDeviceConfiguration {
+    private function saveConfiguration(Device $device, int $counter = 6, ?int $timeDivider = null): OpenPaygoDeviceConfiguration {
         return (new OpenPaygoDeviceConfigurationService())->saveForDevice(
             $device,
             '0123456789abcdef0123456789abcdef',
             123,
             $counter,
+            $timeDivider,
         );
     }
 

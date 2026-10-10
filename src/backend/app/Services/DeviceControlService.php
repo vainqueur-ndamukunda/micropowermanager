@@ -93,7 +93,9 @@ class DeviceControlService {
             0.0,
             $creatorId,
             fn (TransactionDataContainer $container) => $api->unlockDevice($container),
-            fn (Token $token) => "Unlock token generated for device {$device->device_serial}: {$token->token}",
+            fn (Token $token) => $api instanceof OpenPaygoApi
+                ? "Unlock token generated for device {$device->device_serial}"
+                : "Unlock token generated for device {$device->device_serial}: {$token->token}",
             $api instanceof OpenPaygoApi ? $api : null,
             'unlock',
         );
@@ -119,7 +121,9 @@ class DeviceControlService {
             // the container it is handed goes unused here.
             fn (TransactionDataContainer $container) => $api->clearDevice($device)
                 ?? throw new ApiCallDoesNotSupportedException("The manufacturer returned no reset token for device {$device->device_serial}."),
-            fn (Token $token) => "Reset token generated for device {$device->device_serial}: {$token->token}",
+            fn (Token $token) => $api instanceof OpenPaygoApi
+                ? "Reset token generated for device {$device->device_serial}"
+                : "Reset token generated for device {$device->device_serial}: {$token->token}",
             $api instanceof OpenPaygoApi ? $api : null,
             'reset',
         );

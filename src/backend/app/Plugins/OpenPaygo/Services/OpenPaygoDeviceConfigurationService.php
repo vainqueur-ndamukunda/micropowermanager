@@ -11,7 +11,7 @@ use Throwable;
 
 class OpenPaygoDeviceConfigurationService {
     /**
-     * @return array{secretKeyHex: string, startingCode: int, nextCounter: int}
+     * @return array{secretKeyHex: string, startingCode: int, timeDivider: int|null, nextCounter: int}
      */
     public function getForDevice(Device $device): array {
         $configuration = $this->findForDevice($device);
@@ -19,6 +19,7 @@ class OpenPaygoDeviceConfigurationService {
         return [
             'secretKeyHex' => $this->decryptSecret($configuration->secret_key_hex),
             'startingCode' => (int) $configuration->starting_code,
+            'timeDivider' => $configuration->time_divider === null ? null : (int) $configuration->time_divider,
             'nextCounter' => (int) $configuration->next_counter,
         ];
     }
@@ -28,12 +29,16 @@ class OpenPaygoDeviceConfigurationService {
         mixed $secretKeyHex,
         mixed $startingCode,
         mixed $nextCounter = null,
+        mixed $timeDivider = null,
     ): OpenPaygoDeviceConfiguration {
         $this->validateSecret($secretKeyHex);
         $this->validateStartingCode($startingCode);
 
         if ($nextCounter !== null) {
             $this->validateCounter($nextCounter);
+        }
+        if ($timeDivider !== null) {
+            $this->validateTimeDivider($timeDivider);
         }
 
         $configuration = OpenPaygoDeviceConfiguration::query()->firstOrNew(['device_id' => $device->getKey()]);
@@ -49,6 +54,9 @@ class OpenPaygoDeviceConfigurationService {
 
         $configuration->secret_key_hex = $encryptedSecret;
         $configuration->starting_code = $startingCode;
+        if ($timeDivider !== null) {
+            $configuration->time_divider = $timeDivider;
+        }
         if ($nextCounter !== null) {
             $configuration->next_counter = $nextCounter;
         }
@@ -89,6 +97,12 @@ class OpenPaygoDeviceConfigurationService {
     private function validateCounter(mixed $counter): void {
         if (!is_int($counter) || $counter < 0 || $counter > 100000) {
             throw new OpenPaygoDeviceConfigurationException('OpenPAYGO counter must be an integer from 0 to 100000.');
+        }
+    }
+
+    private function validateTimeDivider(mixed $timeDivider): void {
+        if (!is_int($timeDivider) || $timeDivider < 1 || $timeDivider > 255) {
+            throw new OpenPaygoDeviceConfigurationException('OpenPAYGO time divider must be an integer from 1 to 255.');
         }
     }
 }

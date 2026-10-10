@@ -23,11 +23,12 @@ class OpenPaygoDeviceConfigurationServiceTest extends TestCase {
         $service = new OpenPaygoDeviceConfigurationService();
         $secret = '0123456789abcdef0123456789abcdef';
 
-        $configuration = $service->saveForDevice($device, $secret, 0, 0);
+        $configuration = $service->saveForDevice($device, $secret, 0, 0, 4);
 
         $stored = OpenPaygoDeviceConfiguration::query()->findOrFail($configuration->id);
         $this->assertNotSame($secret, $stored->getRawOriginal('secret_key_hex'));
         $this->assertSame($secret, $service->getForDevice($device)['secretKeyHex']);
+        $this->assertSame(4, $service->getForDevice($device)['timeDivider']);
     }
 
     public function testEncryptionFailureDoesNotPersistPlaintextSecret(): void {
@@ -96,6 +97,26 @@ class OpenPaygoDeviceConfigurationServiceTest extends TestCase {
                 $this->assertTrue(true);
             }
         }
+    }
+
+    public function testTimeDividerMustBeAnIntegerBetweenOneAnd255(): void {
+        $device = $this->createDevice();
+        $service = new OpenPaygoDeviceConfigurationService();
+        $secret = '0123456789abcdef0123456789abcdef';
+
+        foreach ([0, 256, -1, '4'] as $timeDivider) {
+            try {
+                $service->saveForDevice($device, $secret, 1, 0, $timeDivider);
+                $this->fail('Expected time-divider validation failure.');
+            } catch (OpenPaygoDeviceConfigurationException) {
+                $this->assertTrue(true);
+            }
+        }
+
+        $service->saveForDevice($device, $secret, 1, 0, 1);
+        $service->saveForDevice($device, $secret, 1, 0, 255);
+
+        $this->assertSame(255, $service->getForDevice($device)['timeDivider']);
     }
 
     public function testOrdinaryConfigurationUpdatePreservesCounterWhenOmitted(): void {

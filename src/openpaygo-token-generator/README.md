@@ -3,7 +3,7 @@
 This component generates OpenPAYGO tokens using the official JavaScript encoder.
 It exposes an authenticated internal HTTP service, a JavaScript function, and a JSON command-line interface.
 MPM includes a PHP manufacturer adapter, tenant-scoped device configuration, issuance reservations, and recovery.
-The adapter supports appliance unlock and reset operations, but energy-credit issuance remains blocked until MPM's credit-to-time mapping and each device's time divider are defined.
+The adapter supports appliance unlock, reset, and time-credit issuance for devices with a configured time divider.
 The complete payment-to-physical-device workflow has not been verified.
 
 ## Run the HTTP service with Docker
@@ -89,8 +89,13 @@ It does not confirm that a device accepted the returned token.
 | `value` | Raw integer credit units, 0-995; omitted for `DISABLE_PAYG` |
 | `restrictedDigitSet` | Boolean, default false; true uses digits 1-4 |
 
-Payment-to-time conversion and rounding belong to the backend.
-The caller must account for the device's configured time divider.
+For ADD_TIME, a device time divider of `d` means each integer value unit grants `1 / d` day.
+The backend therefore converts MPM's whole credit days to the integer generator value with `creditDays * d`; this conversion is exact and does not round.
+OpenPAYGO defines valid dividers as integers 1-255.
+MPM requires an explicit per-device divider and does not assume the protocol's optional default of 1, so existing configurations without one remain blocked until provisioned.
+Provision it explicitly with the fifth `timeDivider` argument to `OpenPaygoDeviceConfigurationService::saveForDevice()` after the device setup sheet or manufacturer specification confirms the value.
+The generator value must be between 1 and 995 for paid credit; MPM rejects zero or out-of-range credit rather than clamping it.
+Payment-to-time conversion and MPM payment rounding belong to the backend.
 Unknown fields are rejected.
 Extended tokens and counter-synchronization commands are not supported in this slice.
 
@@ -235,9 +240,9 @@ Recovery persists a stored generated result or marks a stale in-flight request u
 The PHP service accepts and persists the documented returned-counter range through 100002, then blocks a subsequent request before generation when the stored counter exceeds the encoder's 100000 input limit.
 Issuance validates the persisted transaction's device serial and rejects payment-provider transactions that are not marked successful.
 
-The adapter currently maps appliance unlock to `DISABLE_PAYG` and reset to `SET_TIME` with value zero.
-Its `chargeDevice()` operation remains unsupported: the generator expects raw integer credit units and requires the caller to account for the device time divider, while MPM has no verified per-device mapping for that conversion.
-Partial appliance installments that require added time and energy-service credit therefore fail safely rather than guessing.
+The adapter maps paid time credit to `ADD_TIME` using the configured device divider, appliance unlock to `DISABLE_PAYG`, and reset to `SET_TIME` with value zero.
+The backend reuses `TransactionDataContainer::creditDays()` and its installment/down-payment rules.
+Meter-energy credit remains unsupported because the OpenPAYGO token contract only defines time-based activation values.
 The backend exposes a configuration service, but an administrator-facing configuration UI/API and physical-device acceptance have not been verified.
 
 ## Proposed team agreements
@@ -247,7 +252,7 @@ These are proposals, not maintainer-approved requirements.
 
 | Decision | Proposed agreement |
 | --- | --- |
-| Credit conversion | Backend owns price, time units, and rounding; confirm the simulator's units and device time divider |
+| Credit conversion | OpenPAYGO docs define each integer unit as 1 / divider day; configure an explicit divider per device |
 | Counter ownership | Backend owns one counter per device across every operation and saves the exact returned counter |
 | Payment retries | One payment gets one stored token; block automatic retries after uncertain outcomes until replay safety is verified |
 | Concurrent payments | Serialize issuance for each device and persist token, payment association, and counter atomically |
@@ -262,6 +267,7 @@ Person 4 should record simulator starting state, each issued counter, credit cha
 ## Sources and contribution review
 
 - [Official JavaScript library](https://github.com/EnAccess/OpenPAYGO-js)
+- [OpenPAYGO token customization and time-divider specification](https://enaccess.github.io/OpenPAYGO-docs/docs/openpaygo-token/customization-of-openpaygo-token/)
 - [Published reference examples](https://unpkg.com/openpaygo@0.0.6/test/sample_tokens.json)
 - [MPM plugin guide](../../docs/development/plugins.md)
 - [Hackathon brief](https://github.com/EnAccess/oseas26-mpm-openpaygo-plugin)

@@ -2,6 +2,7 @@
 
 namespace App\Plugins\OpenPaygo\Services;
 
+use App\Exceptions\Manufacturer\ApiCallDoesNotSupportedException;
 use App\Models\Device;
 use App\Models\Token;
 use App\Models\Transaction\BasePaymentProviderTransaction;
@@ -22,13 +23,13 @@ class OpenPaygoIssuanceService {
 
     public function __construct(private OpenPaygoGeneratorClient $generatorClient) {}
 
-    public function issue(Transaction $transaction, Device $device, string $operation): Token {
-        if (!in_array($operation, ['unlock', 'reset'], true)) {
+    public function issue(Transaction $transaction, Device $device, string $operation, ?float $creditDays = null): Token {
+        if (!in_array($operation, ['credit', 'unlock', 'reset'], true)) {
             throw new OpenPaygoIssuanceException('OpenPAYGO issuance operation is invalid.');
         }
 
         $this->validateTransactionDevice($transaction, $device);
-        $reservation = $this->reserve($transaction, $device, $operation);
+        $reservation = $this->reserve($transaction, $device, $operation, $creditDays);
 
         if ($reservation->state === OpenPaygoIssuanceReservation::STATE_COMPLETED) {
             return $transaction->token()->firstOrFail();
@@ -89,10 +90,7 @@ class OpenPaygoIssuanceService {
                 $lockedReservation->save();
             });
         } catch (Throwable $exception) {
-            try {
-                $this->markUncertain($reservation->id);
-            } catch (Throwable) {
-            }
+            $this->markUncertain($reservation->id);
 
             throw new OpenPaygoIssuanceException(
                 'Generator response could not be stored; issuance is uncertain and automatic retry is blocked.',
@@ -139,8 +137,13 @@ class OpenPaygoIssuanceService {
         return $uncertainCount + $generatedIds->count() + $reserved->count();
     }
 
-    private function reserve(Transaction $transaction, Device $device, string $operation): OpenPaygoIssuanceReservation {
-        return DB::connection('tenant')->transaction(function () use ($transaction, $device, $operation): OpenPaygoIssuanceReservation {
+    private function reserve(
+        Transaction $transaction,
+        Device $device,
+        string $operation,
+        ?float $creditDays,
+    ): OpenPaygoIssuanceReservation {
+        return DB::connection('tenant')->transaction(function () use ($transaction, $device, $operation, $creditDays): OpenPaygoIssuanceReservation {
             $lockedTransaction = Transaction::query()
                 ->whereKey($transaction->getKey())
                 ->lockForUpdate()
@@ -170,6 +173,12 @@ class OpenPaygoIssuanceService {
                 if ((int) $existing->device_id !== (int) $device->getKey() || $existing->operation !== $operation) {
                     throw new OpenPaygoIssuanceException('Transaction already has a different OpenPAYGO issuance reservation.');
                 }
+                if ($operation === 'credit'
+                    && $existing->state !== OpenPaygoIssuanceReservation::STATE_COMPLETED
+                    && $creditDays !== null
+                    && (int) $existing->credit_days !== (int) $creditDays) {
+                    throw new OpenPaygoIssuanceException('Transaction already has a different OpenPAYGO credit reservation.');
+                }
 
                 return $existing;
             }
@@ -184,6 +193,12 @@ class OpenPaygoIssuanceService {
             if ($configuration === null) {
                 throw new OpenPaygoDeviceConfigurationException('OpenPAYGO configuration is missing for this device.');
             }
+
+            $generatorValue = match ($operation) {
+                'unlock' => null,
+                'reset' => 0,
+                'credit' => $this->creditValue($creditDays, $configuration->time_divider),
+            };
 
             if ((int) $configuration->next_counter > self::MAXIMUM_INPUT_COUNTER) {
                 throw new OpenPaygoIssuanceException('OpenPAYGO counter is exhausted; issuance is blocked before generation.');
@@ -203,14 +218,44 @@ class OpenPaygoIssuanceService {
                 'device_id' => $device->getKey(),
                 'active_device_id' => $device->getKey(),
                 'operation' => $operation,
-                'generator_operation' => $operation === 'unlock' ? 'DISABLE_PAYG' : 'SET_TIME',
-                'generator_value' => $operation === 'reset' ? 0 : null,
+                'generator_operation' => match ($operation) {
+                    'unlock' => 'DISABLE_PAYG',
+                    'reset' => 'SET_TIME',
+                    'credit' => 'ADD_TIME',
+                },
+                'generator_value' => $generatorValue,
+                'credit_days' => $operation === 'credit' ? (int) $creditDays : null,
                 'counter' => (int) $configuration->next_counter,
                 'starting_code' => (int) $configuration->starting_code,
                 'secret_key_ciphertext' => $configuration->getRawOriginal('secret_key_hex'),
                 'state' => OpenPaygoIssuanceReservation::STATE_RESERVED,
             ]);
         });
+    }
+
+    private function creditValue(?float $creditDays, ?int $timeDivider): int {
+        if ($creditDays === null
+            || !is_finite($creditDays)
+            || $creditDays <= 0
+            || floor($creditDays) !== $creditDays) {
+            throw new ApiCallDoesNotSupportedException('OpenPAYGO credit issuance requires positive whole credit days calculated by MPM.');
+        }
+
+        if ($timeDivider === null || $timeDivider < 1 || $timeDivider > 255) {
+            throw new OpenPaygoDeviceConfigurationException(
+                'OpenPAYGO time divider is missing or invalid; configure an integer from 1 to 255 for this device.'
+            );
+        }
+
+        // The OpenPAYGO token customization specification defines each unit as 1 / divider day.
+        $value = $creditDays * $timeDivider;
+        if (!is_finite($value) || $value < 1 || $value > 995 || floor($value) !== $value) {
+            throw new ApiCallDoesNotSupportedException(
+                'Calculated OpenPAYGO credit must convert to an integer value from 1 to 995.'
+            );
+        }
+
+        return (int) $value;
     }
 
     private function validateTransactionDevice(Transaction $transaction, Device $device): void {
@@ -286,7 +331,13 @@ class OpenPaygoIssuanceService {
 
             $transaction = $reservation->transaction()->lockForUpdate()->firstOrFail();
             $token = $transaction->token()->first();
-            $tokenType = $reservation->operation === 'unlock' ? Token::TYPE_UNLOCK : Token::TYPE_RESET;
+            $tokenType = match ($reservation->operation) {
+                'unlock' => Token::TYPE_UNLOCK,
+                'reset' => Token::TYPE_RESET,
+                'credit' => Token::TYPE_TIME,
+            };
+            $tokenUnit = $reservation->operation === 'credit' ? Token::UNIT_DAYS : null;
+            $tokenAmount = $reservation->operation === 'credit' ? $reservation->credit_days : null;
 
             if ($token === null) {
                 $token = Token::query()->create([
@@ -294,12 +345,15 @@ class OpenPaygoIssuanceService {
                     'transaction_id' => $reservation->transaction_id,
                     'token' => $reservation->token,
                     'token_type' => $tokenType,
-                    'token_unit' => null,
-                    'token_amount' => null,
+                    'token_unit' => $tokenUnit,
+                    'token_amount' => $tokenAmount,
                 ]);
             } elseif ($token->token !== $reservation->token
                 || (int) $token->device_id !== (int) $reservation->device_id
-                || $token->token_type !== $tokenType) {
+                || $token->token_type !== $tokenType
+                || $token->token_unit !== $tokenUnit
+                || ($tokenAmount !== null && (float) $token->token_amount !== (float) $tokenAmount)
+                || ($tokenAmount === null && $token->token_amount !== null)) {
                 throw new OpenPaygoIssuanceException('Stored OpenPAYGO token does not match its generator result.');
             }
 
