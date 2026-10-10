@@ -2,8 +2,9 @@
 
 This component generates OpenPAYGO tokens using the official JavaScript encoder.
 It exposes an authenticated internal HTTP service, a JavaScript function, and a JSON command-line interface.
-It is not yet an installed MPM manufacturer plugin.
-The PHP adapter, registration screens, payment handling, and database persistence belong to the integration work.
+MPM includes a PHP manufacturer adapter, tenant-scoped device configuration, issuance reservations, and recovery.
+The adapter supports appliance unlock and reset operations, but energy-credit issuance remains blocked until MPM's credit-to-time mapping and each device's time divider are defined.
+The complete payment-to-physical-device workflow has not been verified.
 
 ## Run the HTTP service with Docker
 
@@ -192,16 +193,16 @@ The development Compose configuration was validated.
 Laravel's HTTP client in the existing backend and queue worker containers returned the expected public reference token and rejected unauthenticated requests.
 Those connection checks did not boot MPM or access its database.
 The temporary generator container was removed after verification.
-The PHP manufacturer plugin and full payment-to-simulator workflow have not been implemented or verified by these checks.
+The PHP manufacturer plugin exists, but these checks did not verify the full payment-to-simulator workflow.
 
 The CLI remains available through `node cli.js`.
 It reads one JSON object from standard input and returns one JSON result on standard output.
 Errors return JSON on standard error with exit status 1.
 Do not put real device keys directly in shell commands or source files.
 
-## PHP backend handoff
+## PHP backend integration status
 
-Agree on these client settings with Person 2:
+The backend and queue worker read these client settings:
 
 ```text
 OPENPAYGO_GENERATOR_URL=http://openpaygo-generator:3000
@@ -212,57 +213,32 @@ Backend and queue worker must receive the same settings.
 Recreating existing MPM containers to change their environment can run migrations and demo seeding through their entrypoints.
 Coordinate that step separately; starting only the generator does not perform those operations.
 
-Person 2 adds the proposed entry to Laravel's `config/services.php`:
+Laravel defines these values in `src/backend/config/services.php` under `services.openpaygo_generator`:
 
 ```php
-'openpaygo' => [
+'openpaygo_generator' => [
     'url' => env('OPENPAYGO_GENERATOR_URL', 'http://openpaygo-generator:3000'),
     'api_key' => env('OPENPAYGO_GENERATOR_API_KEY'),
+    'connect_timeout' => env('OPENPAYGO_GENERATOR_CONNECT_TIMEOUT', 2),
+    'timeout' => env('OPENPAYGO_GENERATOR_TIMEOUT', 8),
 ],
 ```
 
-An illustrative Laravel call, using a validated `$tokenRequest` array:
-
-```php
-use Illuminate\Support\Facades\Http;
-
-$response = Http::withToken(config('services.openpaygo.api_key'))
-    ->connectTimeout(3)
-    ->timeout(15)
-    ->post(
-        rtrim(config('services.openpaygo.url'), '/').'/generate',
-        $tokenRequest,
-    );
-
-$response->throw();
-$tokenResult = $response->json();
-```
-
-This example has not been added to MPM's PHP code.
-Person 2 must validate the response shape and map failures into MPM's domain exceptions and user-visible processing state.
+`OpenPaygoGeneratorClient` posts validated generator input to `/generate`, validates the response, and redacts transport failures.
 Do not log outgoing request bodies or authorization headers.
-Agree on timeouts for the permitted counter range.
 
-Person 2 owns:
+The PHP configuration service stores device secrets encrypted in the tenant database.
+Reservations pin the operation and counter before generation.
+The generator response is first persisted as a recoverable result; a follow-on tenant-database transaction writes the token, exact next counter, and completed reservation together.
+An uncertain HTTP outcome is not automatically retried unless replay safety has been verified for the installed encoder.
+Recovery persists a stored generated result or marks a stale in-flight request uncertain.
+The PHP service accepts and persists the documented returned-counter range through 100002, then blocks a subsequent request before generation when the stored counter exceeds the encoder's 100000 input limit.
+Issuance validates the persisted transaction's device serial and rejects payment-provider transactions that are not marked successful.
 
-- Manufacturer-plugin installation, registration, and API binding.
-- Tenant-scoped device configuration and protected secret storage.
-- Payment-to-credit conversion and token metadata.
-- Coordination of counters across charge, set-time, and unlock operations.
-- Atomic persistence of the token and returned counter for a transaction.
-- Duplicate callbacks, repeated queue jobs, and retries.
-- Tests of the PHP client and payment workflow.
-
-Generation is stateless and deterministic.
-A network retry with identical input returns identical output.
-Retrying with a newly advanced counter would issue a different token and can grant duplicate credit.
-Reserve or lock device state and coordinate transaction idempotency before calling; persist the resulting token and next counter atomically.
-Do not assume the HTTP service prevents concurrent payments from using the same counter.
-
-Person 3 owns device registration, customer assignment, and displaying stored tokens and processing errors.
-Person 4 owns the reproducible MPM-to-simulator demonstration.
-A contributor reports manual simulator success for the generator; record the exact devices, operations, counter transitions, and replay checks before submission.
-Production Compose and Kubernetes deployment wiring are outside this development service package.
+The adapter currently maps appliance unlock to `DISABLE_PAYG` and reset to `SET_TIME` with value zero.
+Its `chargeDevice()` operation remains unsupported: the generator expects raw integer credit units and requires the caller to account for the device time divider, while MPM has no verified per-device mapping for that conversion.
+Partial appliance installments that require added time and energy-service credit therefore fail safely rather than guessing.
+The backend exposes a configuration service, but an administrator-facing configuration UI/API and physical-device acceptance have not been verified.
 
 ## Proposed team agreements
 
@@ -273,7 +249,7 @@ These are proposals, not maintainer-approved requirements.
 | --- | --- |
 | Credit conversion | Backend owns price, time units, and rounding; confirm the simulator's units and device time divider |
 | Counter ownership | Backend owns one counter per device across every operation and saves the exact returned counter |
-| Payment retries | One payment gets one stored token; retry identical input after uncertain network failures |
+| Payment retries | One payment gets one stored token; block automatic retries after uncertain outcomes until replay safety is verified |
 | Concurrent payments | Serialize issuance for each device and persist token, payment association, and counter atomically |
 | Secrets | Keep device keys and the shared service key in backend-only configuration or protected storage |
 | Failures | Keep payment processing state visible and avoid claiming credit was delivered when generation fails |

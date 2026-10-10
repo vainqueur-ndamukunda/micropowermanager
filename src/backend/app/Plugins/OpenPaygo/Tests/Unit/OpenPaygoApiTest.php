@@ -16,10 +16,12 @@ use App\Plugins\OpenPaygo\OpenPaygoApi;
 use App\Plugins\OpenPaygo\Services\OpenPaygoIssuanceService;
 use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
+use Tests\RefreshMultipleDatabases;
 use Tests\TestCase;
 
 class OpenPaygoApiTest extends TestCase {
     use MockeryPHPUnitIntegration;
+    use RefreshMultipleDatabases;
 
     public function testCapabilitiesAdvertiseOnlyVerifiedProtocolOperations(): void {
         $api = new OpenPaygoApi(Mockery::mock(OpenPaygoIssuanceService::class));

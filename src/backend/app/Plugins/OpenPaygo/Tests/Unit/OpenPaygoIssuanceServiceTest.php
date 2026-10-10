@@ -77,6 +77,51 @@ class OpenPaygoIssuanceServiceTest extends TestCase {
         );
     }
 
+    public function testGeneratorReturnedCounterMayReachDocumentedBoundary(): void {
+        $device = $this->createDevice();
+        $this->saveConfiguration($device, 100000);
+        $transaction = $this->createTransaction($device);
+        $generator = Mockery::mock(OpenPaygoGeneratorClient::class);
+        $generator->shouldReceive('generateToken')->once()->andReturn([
+            'token' => 'boundary-token',
+            'nextCounter' => 100002,
+        ]);
+        $service = new OpenPaygoIssuanceService($generator);
+
+        $token = $service->issue($transaction, $device, 'unlock');
+
+        $this->assertSame('boundary-token', $token->token);
+        $this->assertSame(100002, (new OpenPaygoDeviceConfigurationService())->getForDevice($device)['nextCounter']);
+    }
+
+    public function testCounterBeyondGeneratorInputLimitBlocksBeforeExternalCall(): void {
+        $device = $this->createDevice();
+        $configuration = $this->saveConfiguration($device, 100000);
+        $configuration->next_counter = 100001;
+        $configuration->save();
+        $transaction = $this->createTransaction($device);
+        $generator = Mockery::mock(OpenPaygoGeneratorClient::class);
+        $generator->shouldNotReceive('generateToken');
+        $service = new OpenPaygoIssuanceService($generator);
+
+        $this->expectException(OpenPaygoIssuanceException::class);
+        $this->expectExceptionMessage('counter is exhausted');
+        $service->issue($transaction, $device, 'unlock');
+    }
+
+    public function testTransactionCannotIssueForAnotherDevice(): void {
+        $device = $this->createDevice();
+        $otherDevice = $this->createDevice();
+        $this->saveConfiguration($device);
+        $transaction = $this->createTransaction($device);
+        $generator = Mockery::mock(OpenPaygoGeneratorClient::class);
+        $generator->shouldNotReceive('generateToken');
+
+        $this->expectException(OpenPaygoIssuanceException::class);
+        $this->expectExceptionMessage('does not belong to this device');
+        (new OpenPaygoIssuanceService($generator))->issue($transaction, $otherDevice, 'unlock');
+    }
+
     public function testDuplicateUncertainRequestDoesNotCallGeneratorAgain(): void {
         $device = $this->createDevice();
         $this->saveConfiguration($device);

@@ -4,6 +4,7 @@ namespace App\Plugins\OpenPaygo\Services;
 
 use App\Models\Device;
 use App\Models\Token;
+use App\Models\Transaction\BasePaymentProviderTransaction;
 use App\Models\Transaction\Transaction;
 use App\Plugins\OpenPaygo\Exceptions\OpenPaygoDeviceConfigurationException;
 use App\Plugins\OpenPaygo\Exceptions\OpenPaygoIssuanceException;
@@ -15,6 +16,10 @@ use Illuminate\Support\Facades\DB;
 use Throwable;
 
 class OpenPaygoIssuanceService {
+    private const MAXIMUM_INPUT_COUNTER = 100000;
+
+    private const MAXIMUM_RETURNED_COUNTER = 100002;
+
     public function __construct(private OpenPaygoGeneratorClient $generatorClient) {}
 
     public function issue(Transaction $transaction, Device $device, string $operation): Token {
@@ -22,6 +27,7 @@ class OpenPaygoIssuanceService {
             throw new OpenPaygoIssuanceException('OpenPAYGO issuance operation is invalid.');
         }
 
+        $this->validateTransactionDevice($transaction, $device);
         $reservation = $this->reserve($transaction, $device, $operation);
 
         if ($reservation->state === OpenPaygoIssuanceReservation::STATE_COMPLETED) {
@@ -60,7 +66,7 @@ class OpenPaygoIssuanceService {
             );
         }
 
-        if ($generated['nextCounter'] < 0 || $generated['nextCounter'] > 100000) {
+        if ($generated['nextCounter'] < 0 || $generated['nextCounter'] > self::MAXIMUM_RETURNED_COUNTER) {
             $this->markUncertain($reservation->id);
 
             throw new OpenPaygoIssuanceException('OpenPAYGO generator returned an invalid next counter.');
@@ -135,8 +141,28 @@ class OpenPaygoIssuanceService {
 
     private function reserve(Transaction $transaction, Device $device, string $operation): OpenPaygoIssuanceReservation {
         return DB::connection('tenant')->transaction(function () use ($transaction, $device, $operation): OpenPaygoIssuanceReservation {
+            $lockedTransaction = Transaction::query()
+                ->whereKey($transaction->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            if ($lockedTransaction === null) {
+                throw new OpenPaygoIssuanceException('OpenPAYGO issuance requires a persisted transaction.');
+            }
+
+            $lockedDevice = Device::query()
+                ->whereKey($device->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            if ($lockedDevice === null) {
+                throw new OpenPaygoIssuanceException('OpenPAYGO issuance requires a persisted device.');
+            }
+
+            $this->validateTransactionDevice($lockedTransaction, $lockedDevice);
+
             $existing = OpenPaygoIssuanceReservation::query()
-                ->where('transaction_id', $transaction->getKey())
+                ->where('transaction_id', $lockedTransaction->getKey())
                 ->lockForUpdate()
                 ->first();
 
@@ -148,6 +174,8 @@ class OpenPaygoIssuanceService {
                 return $existing;
             }
 
+            $this->validateTransactionEligibility($lockedTransaction);
+
             $configuration = OpenPaygoDeviceConfiguration::query()
                 ->where('device_id', $device->getKey())
                 ->lockForUpdate()
@@ -155,6 +183,10 @@ class OpenPaygoIssuanceService {
 
             if ($configuration === null) {
                 throw new OpenPaygoDeviceConfigurationException('OpenPAYGO configuration is missing for this device.');
+            }
+
+            if ((int) $configuration->next_counter > self::MAXIMUM_INPUT_COUNTER) {
+                throw new OpenPaygoIssuanceException('OpenPAYGO counter is exhausted; issuance is blocked before generation.');
             }
 
             $active = OpenPaygoIssuanceReservation::query()
@@ -167,7 +199,7 @@ class OpenPaygoIssuanceService {
             }
 
             return OpenPaygoIssuanceReservation::query()->create([
-                'transaction_id' => $transaction->getKey(),
+                'transaction_id' => $lockedTransaction->getKey(),
                 'device_id' => $device->getKey(),
                 'active_device_id' => $device->getKey(),
                 'operation' => $operation,
@@ -179,6 +211,32 @@ class OpenPaygoIssuanceService {
                 'state' => OpenPaygoIssuanceReservation::STATE_RESERVED,
             ]);
         });
+    }
+
+    private function validateTransactionDevice(Transaction $transaction, Device $device): void {
+        if (!$transaction->exists || $transaction->getKey() === null) {
+            throw new OpenPaygoIssuanceException('OpenPAYGO issuance requires a persisted transaction.');
+        }
+
+        if (!is_string($transaction->message)
+            || $transaction->message === ''
+            || $transaction->message !== $device->device_serial) {
+            throw new OpenPaygoIssuanceException('OpenPAYGO transaction does not belong to this device.');
+        }
+    }
+
+    private function validateTransactionEligibility(Transaction $transaction): void {
+        $originalTransaction = $transaction->originalTransaction()->lockForUpdate()->first();
+
+        if ($originalTransaction instanceof BasePaymentProviderTransaction
+            && $originalTransaction->status !== BasePaymentProviderTransaction::STATUS_SUCCESS) {
+            throw new OpenPaygoIssuanceException('OpenPAYGO issuance requires a successful payment transaction.');
+        }
+
+        if (!$originalTransaction instanceof BasePaymentProviderTransaction
+            && $transaction->type !== Transaction::TYPE_AD_HOC) {
+            throw new OpenPaygoIssuanceException('OpenPAYGO issuance requires a successful payment transaction.');
+        }
     }
 
     private function markRequesting(int $reservationId): OpenPaygoIssuanceReservation {
